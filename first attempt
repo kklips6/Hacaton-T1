@@ -1,0 +1,42 @@
+import csv
+import math
+import random
+client=[]
+with open('clinic-data.csv', 'r') as f:
+    s=f.readlines()
+    for i in range(len(s)):
+        if i!=0:
+            s[i]=s[i].split(',')
+            x,y=float(s[i][0]),float(s[i][1])
+            client.append([x,y])
+clients=client
+
+#разбиваем на кластеры
+from math import dist
+clusters = []
+while client:
+    cl = [client.pop()]
+    for p in cl:
+        sosed = [p1 for p1 in client if dist(p,p1)<2.28]
+        cl = cl + sosed
+    for p1 in sosed: client. remove(p1)
+    clusters. append(cl)
+# print(len(clusters),[len(cl) for cl in clusters])
+
+def centr(e):# определяет центроиды
+    mn=10**8
+    for i in e:
+        x,y=i
+        l=0
+        for j in e:
+            l+=dist(i,j)
+        if l<mn:
+            mn=l
+            a1=x
+            a2=y
+    return (a1,a2)
+coord_clinicsc=[]
+for cl in clusters:
+    b=centr(cl)
+    coord_clinicsc.append(b)
+    print(b)
