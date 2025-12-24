@@ -1,0 +1,292 @@
+import csv
+import math
+import random
+
+clients_with_features = []
+with open('clinic-data.csv', 'r') as f:
+    s = f.readlines()
+    for i in range(len(s)):
+        if i != 0:
+            s[i] = s[i].strip().split(',')
+            x = float(s[i][0])
+            y = float(s[i][1])
+            client_age = float(s[i][2])
+            clinick_distance = float(s[i][3])
+            density_area = float(s[i][4])
+            park_distance = float(s[i][5])
+            vulnerable_group_density = float(s[i][6])
+            social_infrastructure_rating = float(s[i][7])
+            
+            clients_with_features.append([
+                x, y, client_age, clinick_distance, density_area,
+                park_distance, vulnerable_group_density, social_infrastructure_rating
+            ])
+
+# print((clients_with_features[0:10]))
+
+
+# Разбиваем на кластеры (DBSCAN)
+client_coords_only = [[c[0], c[1]] for c in clients_with_features]
+client = client_coords_only.copy()
+
+clusters = []
+while client:
+    cl = [client.pop()]
+    for p in cl:
+        sosed = [p1 for p1 in client if math.dist(p, p1) < 2.28]
+        cl = cl + sosed
+    for p1 in sosed:
+        client.remove(p1)
+    clusters.append(cl)
+
+
+# 3. Определяем центроиды
+def centr(e):
+    mn = 10**8
+    a1, a2 = 0, 0
+    for i in e:
+        x, y = i
+        l = 0
+        for j in e:
+            l += math.dist(i, j)
+        if l < mn:
+            mn = l
+            a1 = x
+            a2 = y
+    return (a1, a2)
+
+coord_clinicsc = []
+for cl in clusters:
+    b = centr(cl)
+    coord_clinicsc.append(list(b))
+
+# 4. Распределяем клиентов по ближайшим клиникам
+def assign_clients_to_clinics(clients, clinics):
+    assignments = {i: [] for i in range(len(clinics))}
+    clinic_counts = {i: 0 for i in range(len(clinics))}
+    
+    for c in clients:
+        min_dist = 10**8
+        nearest_clinic = 0
+        for j, clinic in enumerate(clinics):
+            d = math.dist(c[:2], clinic)  # Используем только координаты
+            if d < min_dist:
+                min_dist = d
+                nearest_clinic = j
+        
+        assignments[nearest_clinic].append(c)
+        clinic_counts[nearest_clinic] += 1
+    
+    return assignments, clinic_counts
+assignments, counts = assign_clients_to_clinics(clients_with_features, coord_clinicsc)
+# Смотрим перегруженные клиники
+overloaded = []
+c = 0
+for clinic_idx, count in counts.items():
+    if count > 1000:
+        overloaded.append((clinic_idx, count))
+        print(f"Клиника {clinic_idx}: превышение: {count-1000}")
+        c += 1
+
+if c == 0:
+    print(' Клиники не перегружены')
+
+# 5. Вычисляем метрики из задания
+def calculate_metrics(clinics, assignments, counts):
+    M = sum(len(patients) for patients in assignments.values())
+    N = len(clinics)
+    
+    # 1. TTT - Суммарное время в пути для всех клиентов (Total Travel Time)
+    TTT = 0
+    alpha = 0.05
+    beta = 0.02
+    
+    for clinic_idx, patients in assignments.items():
+        clinic_coords = clinics[clinic_idx]
+        for patient in patients:
+            d = math.dist(patient[:2], clinic_coords)
+            TTT += alpha * d + beta * (d ** 2)
+    
+    # 2. CO - Clinics Overload (Перегрузка клиник)
+    L = 1000
+    CO = 0
+    for cnt in counts.values():
+        CO += max(0, cnt - L)
+  
+    # Для каждой клиники собираем средние фичи её пациентов
+    LCS_total = 0
+    w1, w2, w3, w4 = 0.5, 0.5, 0.5, 0.5 
+    
+    for clinic_idx, patients in assignments.items():
+        if not patients:
+            continue
+            
+        avg_DA = sum(p[4] for p in patients) / len(patients)  # density_area
+        avg_PD = sum(p[5] for p in patients) / len(patients)  # park_distance
+        avg_VD = sum(p[6] for p in patients) / len(patients)  # vulnerable_group_density
+        avg_SI = sum(p[7] for p in patients) / len(patients)  # social_infrastructure_rating
+        
+        park_score = 1.0 / (avg_PD + 1.0)
+        
+        clinic_score = (w1 * avg_DA + 
+                       w2 * park_score +  # Используем преобразованное значение
+                       w3 * avg_VD + 
+                       w4 * avg_SI)
+        
+        LCS_total += clinic_score
+    
+    LCS = LCS_total / N if N > 0 else 0
+    
+    # 3. Итоговая стоимость 
+    y = 0.01  # штраф
+    T = (TTT / M) + (y * CO)  
+    
+    return {
+        'TTT': TTT,
+        'CO': CO,
+        'LCS': LCS,
+        'Total_Cost': T,
+        'Avg_Travel': TTT / M if M > 0 else 0,
+        'Penalty': y * CO
+    }
+
+
+# 6. Оптимизация положения клиник с учетом фич,минимизируя TTT и максимизируя LCS
+def optimize_with_features(clinic_coords, assigned_clients, current_TTT_contribution):
+    if not assigned_clients:
+        return clinic_coords
+    
+    x, y = clinic_coords
+    best_x, best_y = x, y
+    best_score = float('inf')
+    
+    # Параметры
+    alpha = 0.05
+    beta = 0.02
+    
+    # Пробуем разные положения в радиусе 2 единиц
+    for dx in [-2, -1, 0, 1, 2]:
+        for dy in [-2, -1, 0, 1, 2]:
+            new_x = x + dx * 0.5
+            new_y = y + dy * 0.5
+            
+            # Проверяем границы
+            if not (-1000 <= new_x <= 1000 and -1000 <= new_y <= 1000):
+                continue
+            
+            # 1. Вычисляем вклад в TTT для этого положения
+            new_TTT_contribution = 0
+            for client in assigned_clients:
+                d = math.dist([new_x, new_y], client[:2])
+                new_TTT_contribution += alpha * d + beta * (d ** 2)
+            
+            # 2. Разница в TTT (чем меньше, тем лучше)
+            TTT_diff = new_TTT_contribution - current_TTT_contribution
+            
+            # 3. Оцениваем влияние на LCS через фичи клиентов
+            # Собираем средние фичи для этой позиции
+            if assigned_clients:
+                avg_DA = sum(c[4] for c in assigned_clients) / len(assigned_clients)
+                avg_PD = sum(c[5] for c in assigned_clients) / len(assigned_clients)
+                avg_VD = sum(c[6] for c in assigned_clients) / len(assigned_clients)
+                avg_SI = sum(c[7] for c in assigned_clients) / len(assigned_clients)
+                
+                # Преобразуем park_distance (чем меньше, тем лучше для LCS)
+                park_score = 1.0 / (avg_PD + 1.0)
+                
+                # Оценка LCS для этой группы клиентов
+                # Чем выше LCS, тем лучше расположение
+                lcs_score = avg_DA + park_score + avg_VD + avg_SI
+                
+                # Преобразуем в "стоимость" (чем выше LCS, тем ниже должна быть стоимость)
+                # Используем обратную зависимость
+                lcs_cost = 100.0 / (lcs_score + 1.0)
+            else:
+                lcs_cost = 0
+            
+            # 4. Итоговый score (минимизируем)
+            # Баланс между уменьшением TTT и увеличением LCS
+            total_score = TTT_diff + lcs_cost * 0.1  # Коэф. 0.1 для баланса
+            
+            if total_score < best_score:
+                best_score = total_score
+                best_x, best_y = new_x, new_y
+    
+    return [best_x, best_y]
+
+# 7. Применяем оптимизацию ко всем клиникам
+# Сначала вычисляем текущий вклад каждой клиники в TTT
+clinic_TTT_contributions = []
+for clinic_idx, patients in assignments.items():
+    clinic_coords = coord_clinicsc[clinic_idx]
+    contribution = 0
+    alpha = 0.05
+    beta = 0.02
+    
+    for patient in patients:
+        d = math.dist(patient[:2], clinic_coords)
+        contribution += alpha * d + beta * (d ** 2)
+    
+    clinic_TTT_contributions.append(contribution)
+
+# Оптимизируем каждую клинику
+optimized_clinics = []
+for i in range(len(coord_clinicsc)):
+    patients = assignments.get(i, [])
+    current_TTT = clinic_TTT_contributions[i] if i < len(clinic_TTT_contributions) else 0
+    
+    optimized = optimize_with_features(
+        coord_clinicsc[i], 
+        patients, 
+        current_TTT
+    )
+    optimized_clinics.append(optimized)
+
+# 8. Финальное распределение и вычисление метрик
+final_assignments, final_counts = assign_clients_to_clinics(
+    clients_with_features, 
+    optimized_clinics
+)
+
+# Проверяем финальную перегрузку
+final_overloaded = sum(1 for cnt in final_counts.values() if cnt > 1000)
+if final_overloaded > 0:
+    print(f"Внимание: {final_overloaded} клиник все еще перегружены!")
+    # Дополнительное исправление
+    optimized_clinics, final_assignments, final_counts = fix_overloaded_clinics(
+        optimized_clinics, final_assignments, final_counts, max_patients=1000
+    )
+
+# # 9. Вычисляем финальные метрики
+# metrics = calculate_metrics(optimized_clinics, final_assignments, final_counts)
+
+# print("\n" + "="*50)
+# print("ИТОГОВЫЕ МЕТРИКИ:")
+# print("="*50)
+# print(f"1. Total Travel Time (TTT): {metrics['TTT']:.2f}")
+# print(f"2. Average Travel Time: {metrics['Avg_Travel']:.4f}")
+# print(f"3. Clinics Overload (CO): {metrics['CO']:.0f} пациентов сверх лимита")
+# print(f"4. Penalty for Overload: {metrics['Penalty']:.4f}")
+# print(f"5. Location Convenience Score (LCS): {metrics['LCS']:.4f}")
+# print(f"6. TOTAL COST (T): {metrics['Total_Cost']:.6f}")
+# print("="*50)
+
+# # Статистика по загрузке
+# print("\nСТАТИСТИКА ЗАГРУЗКИ КЛИНИК:")
+# print(f"Всего клиник: {len(optimized_clinics)}")
+# print(f"Всего клиентов: {sum(final_counts.values())}")
+# print(f"Средняя загрузка: {sum(final_counts.values())/len(final_counts):.1f}")
+# print(f"Минимальная загрузка: {min(final_counts.values())}")
+# print(f"Максимальная загрузка: {max(final_counts.values())}")
+# print(f"Клиник с >900 пациентами: {sum(1 for c in final_counts.values() if c > 900)}")
+# print(f"Клиник с <100 пациентами: {sum(1 for c in final_counts.values() if c < 100)}")
+
+for clinic in optimized_clinics:
+        print(clinic[0],clinic[1])
+    
+# 10. Сохраняем результат
+with open('clinics_output.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    for clinic in optimized_clinics:
+        writer.writerow([f"{clinic[0]:.6f}", f"{clinic[1]:.6f}"])
+
